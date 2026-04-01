@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Delos 2.0 | Global Expedition Feed</title>
+    <title>abtoy | Global weather Expedition</title>
     
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -139,6 +139,75 @@
 
         .tab-btn.active { background: #30363d; color: var(--neon); }
 
+        .map-btn {
+            background: #161b22;
+            border: 1px solid var(--border);
+            color: var(--text-main);
+            font-size: 0.7rem;
+            padding: 6px 10px;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+
+        .map-btn.active {
+            border-color: var(--neon);
+            color: var(--neon);
+            box-shadow: 0 0 8px rgba(0, 242, 255, 0.35);
+        }
+
+        .chart-area { position: relative; overflow: hidden; }
+
+        .chart-tooltip {
+            position: absolute;
+            z-index: 100;
+            background: rgba(5, 10, 15, 0.95);
+            color: #e6edf3;
+            border: 1px solid rgba(255,255,255,0.2);
+            padding: 6px 8px;
+            border-radius: 6px;
+            font-size: 0.68rem;
+            white-space: nowrap;
+            pointer-events: none;
+            transform: translate(-50%, -120%);
+            display: none;
+        }
+
+        .chart-area svg polyline {
+            stroke-dasharray: 200;
+            stroke-dashoffset: 200;
+            animation: drawLine 1.2s ease-out forwards;
+        }
+
+        @keyframes drawLine {
+            to { stroke-dashoffset: 0; }
+        }
+
+        .point-node {
+            cursor: pointer;
+            transition: transform 0.2s ease-out, opacity 0.2s ease-out;
+            opacity: 0.9;
+        }
+
+        .point-node:hover {
+            transform: scale(1.35);
+            opacity: 1;
+        }
+
+        .details-panel {
+            margin-top: 10px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.25);
+            display: none;
+        }
+
+        .details-panel strong {
+            display: block;
+            margin-bottom: 4px;
+            color: var(--text-main);
+        }
+
         /* Forecast Scroll */
         .forecast-container {
             display: flex;
@@ -201,12 +270,27 @@
         <div id="map"></div>
 
         <div class="weather-panel">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
                 <div>
                     <h2 id="cityName" style="margin:0; font-size: 1.1rem; color:white;">Base Station</h2>
                     <span id="updateTime" style="font-size:0.6rem; color:var(--text-dim);">UTC SYNCED</span>
                 </div>
                 <div id="marineStatus" style="font-size: 0.6rem; color: var(--accent); font-weight: bold; border: 1px solid var(--accent); padding: 2px 6px; border-radius: 4px;">ACTIVE</div>
+            </div>
+
+            <div class="map-controls" style="display:flex; gap:8px; margin-bottom:12px;">
+                <button class="map-btn active" id="darkModeBtn" onclick="setMapLayer('dark')">Dark</button>
+                <button class="map-btn" id="satModeBtn" onclick="setMapLayer('satellite')">Satellite</button>
+            </div>
+
+            <div id="forecastSummary" style="margin-bottom:14px;">
+                <div style="display:flex; justify-content: space-between; align-items:center; margin-bottom:6px;">
+                    <strong style="color:var(--text-main);">Forecast Summary</strong>
+                    <span style="font-size:0.65rem; color:var(--text-dim);">Now / 24h / 7d</span>
+                </div>
+                <div class="chart-area" id="chartArea" style="width:100%; height:135px; border:1px solid var(--border); border-radius:10px; background:rgba(0,0,0,0.2);"></div>
+                <div id="chartTooltip" class="chart-tooltip"></div>
+                <div class="forecast-grid" id="forecastGrid" style="display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:8px;"></div>
             </div>
 
             <div class="tabs">
@@ -230,6 +314,10 @@
                 </div>
             </div>
             
+            <div class="details-panel" id="detailsPanel">
+                <strong>Selected forecast details</strong>
+                <div id="detailsContent" style="font-size:0.74rem; color:var(--text-dim); line-height:1.35;"></div>
+            </div>
             <div id="aiSummary">Initiating satellite uplink...</div>
         </div>
     </main>
@@ -251,10 +339,152 @@
     let markers = [];
     let activeLocIndex = 0;
     let currentData = null;
+    let darkLayer;
+    let satelliteLayer;
+
+    function setMapLayer(type) {
+        if (!map || !darkLayer || !satelliteLayer) return;
+        if (type === 'satellite') {
+            map.removeLayer(darkLayer);
+            if (!map.hasLayer(satelliteLayer)) map.addLayer(satelliteLayer);
+            document.getElementById('satModeBtn').classList.add('active');
+            document.getElementById('darkModeBtn').classList.remove('active');
+        } else {
+            map.removeLayer(satelliteLayer);
+            if (!map.hasLayer(darkLayer)) map.addLayer(darkLayer);
+            document.getElementById('darkModeBtn').classList.add('active');
+            document.getElementById('satModeBtn').classList.remove('active');
+        }
+    }
+
+    function setForecastDetails(title, details) {
+        const panel = document.getElementById('detailsPanel');
+        const content = document.getElementById('detailsContent');
+        panel.style.display = 'block';
+        content.innerHTML = `<strong>${title}</strong>${details}`;
+    }
+
+    function renderForecastCombined() {
+        if (!currentData) return;
+
+        const grid = document.getElementById('forecastGrid');
+        grid.innerHTML = '';
+
+        const rows = [];
+
+        // Now
+        const nowTemp = Math.round(currentData.current.temperature_2m);
+        const nowWind = (currentData.current.wind_speed_10m * 0.539).toFixed(1);
+        const nowHum = currentData.current.relative_humidity_2m;
+        rows.push({ label: 'Now', value: `${nowTemp}°C`, wind: `${nowWind}kn`, humidity: `${nowHum}%`, details: 'Current last observations.' });
+
+        // 24h hourly
+        for (let i = 1; i <= 24 && i < currentData.hourly.time.length; i += 6) {
+            const hour = new Date(currentData.hourly.time[i]).getHours();
+            const temp = Math.round(currentData.hourly.temperature_2m[i]);
+            const wind = (currentData.hourly.wind_speed_10m[i] * 0.539).toFixed(1);
+            rows.push({ label: `${hour}:00`, value: `${temp}°C`, wind: `${wind}kn`, humidity: '-', details: '24h hourly forecast snapshot.' });
+        }
+
+        // 7d daily
+        for (let i = 1; i < 8 && i < currentData.daily.time.length; i++) {
+            const day = new Date(currentData.daily.time[i]).toLocaleDateString('en-US', { weekday: 'short' });
+            const temp = Math.round(currentData.daily.temperature_2m_max[i]);
+            const wind = (currentData.daily.wind_speed_10m_max[i] * 0.539).toFixed(1);
+            rows.push({ label: day, value: `${temp}°C`, wind: `${wind}kn`, humidity: '-', details: '7-day peak forecast.' });
+        }
+
+        // Build snapshot cards
+        rows.forEach(item => {
+            const card = document.createElement('div');
+            card.style.padding = '8px';
+            card.style.background = 'rgba(255,255,255,0.05)';
+            card.style.border = '1px solid rgba(255,255,255,0.08)';
+            card.style.borderRadius = '10px';
+            card.style.cursor = 'pointer';
+            card.innerHTML = `
+                <div style="font-size:0.7rem;color:var(--text-dim);">${item.label}</div>
+                <div style="font-size:0.95rem;font-weight:700;">${item.value}</div>
+                <div style="font-size:0.68rem;color:var(--neon);">${item.wind}</div>
+            `;
+            card.onclick = () => setForecastDetails(`Details for ${item.label}`, `<p>Temp: ${item.value}<br>Wind: ${item.wind}<br>Humidity: ${item.humidity}<br>${item.details}</p>`);
+            grid.appendChild(card);
+        });
+
+        // Draw simple SVG graph
+        const chartArea = document.getElementById('chartArea');
+        const points = [];
+        const values = [];
+
+        // current + 24h hourly + daily max
+        values.push(nowTemp);
+        for (let i = 1; i <= 24 && i < currentData.hourly.temperature_2m.length; i += 2) {
+            values.push(Math.round(currentData.hourly.temperature_2m[i]));
+        }
+        for (let i = 1; i < 8 && i < currentData.daily.temperature_2m_max.length; i++) {
+            values.push(Math.round(currentData.daily.temperature_2m_max[i]));
+        }
+
+        const minTemp = Math.min(...values);
+        const maxTemp = Math.max(...values);
+        const count = values.length;
+        const width = 100;
+        const height = 70;
+
+        const svgPoints = values.map((val, idx) => {
+            const x = (idx / (count - 1)) * (width - 12) + 6;
+            const y = height - ((val - minTemp) / (maxTemp - minTemp || 1)) * (height - 12) - 6;
+            return `${x},${y}`;
+        }).join(' ');
+
+        const pointElements = values.map((val, idx) => {
+            const x = (idx / (count - 1)) * (width - 12) + 6;
+            const y = height - ((val - minTemp) / (maxTemp - minTemp || 1)) * (height - 12) - 6;
+            return `<circle class="point-node" cx="${x}" cy="${y}" r="2.8" fill="#00f2ff" data-temp="${val}" data-index="${idx}" />`;
+        }).join('');
+
+        chartArea.innerHTML = `
+            <svg width="100%" height="100%" viewBox="0 0 100 70" preserveAspectRatio="none">
+                <rect x="0" y="0" width="100" height="70" fill="none" />
+                <polygon points="${svgPoints}" fill="rgba(0,242,255,0.12)" stroke="none" />
+                <polyline points="${svgPoints}" fill="none" stroke="#00f2ff" stroke-width="1.5" stroke-linejoin="round" />
+                <g class="point-group">${pointElements}</g>
+            </svg>
+        `;
+
+        const tooltip = document.getElementById('chartTooltip');
+        chartArea.querySelectorAll('.point-node').forEach(node => {
+            node.addEventListener('mouseenter', (e) => {
+                const temp = e.target.getAttribute('data-temp');
+                const idx = e.target.getAttribute('data-index');
+                tooltip.style.display = 'block';
+                tooltip.innerHTML = `Value: ${temp}°C<br>Index: ${idx}`;
+            });
+
+            node.addEventListener('mousemove', (e) => {
+                const rect = chartArea.getBoundingClientRect();
+                tooltip.style.left = `${e.clientX - rect.left}px`;
+                tooltip.style.top = `${e.clientY - rect.top}px`;
+            });
+
+            node.addEventListener('mouseleave', () => {
+                tooltip.style.display = 'none';
+            });
+        });
+    }
 
     function init() {
         map = L.map('map', { center: [20, 20], zoom: 3, zoomControl: false, attributionControl: false });
-        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png').addTo(map);
+
+        darkLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            maxZoom: 19,
+            subdomains: 'abcd'
+        });
+        satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+            maxZoom: 19
+        });
+
+        darkLayer.addTo(map);
 
         const sidebar = document.getElementById('sidebar');
         locations.forEach((loc, i) => {
@@ -361,6 +591,7 @@
             const rainTrend = "Stable barometric pressure.";
             document.getElementById('aiSummary').innerText = insight + rainTrend;
             document.getElementById('updateTime').innerText = `SYNCED: ${new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}`;
+            renderForecastCombined();
 
         } catch (e) {
             document.getElementById('aiSummary').innerText = "LINK FAILURE: Check satellite positioning.";
